@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <algorithm>
 #include <map>
 
 struct value {
@@ -25,11 +26,31 @@ struct value {
     }
 };
 
+struct progstate;
+struct globalstate
+{
+    std::map<double, progstate *> instances;
+    double nextinstance = 1000000;
+    
+    void reset()
+    {
+        instances.clear();
+        nextinstance = 1000000;
+    }
+};
+
+globalstate global;
+
 struct progstate
 {
     uint64_t pc = 0;
     bool truth_register = false;
-    std::vector<uint8_t> bytecode;
+    
+    bool lvalue_islocal = true; // if false, reference under lvalue_id
+    double lvalue_id = 0;
+    std::string lvalue_name = "";
+    
+    std::vector<uint8_t> bytecode; // main function of program
     std::vector<std::map<std::string, value>> variables;
     std::vector<std::vector<value>> stack;
     std::vector<uint64_t> stackdepths;
@@ -42,6 +63,17 @@ struct progstate
         stack.clear();
         stackdepths.clear();
     }
+    
+    void exit()
+    {
+        while(variables.size() > 1)
+            variables.pop_back();
+        while(stack.size() > 1)
+            stack.pop_back();
+        stackdepths.clear();
+        truth_register = false;
+        pc = 0;
+    }
 };
 
 enum {
@@ -49,13 +81,17 @@ enum {
     PUSHVAL   = 0x01,
     PUSHTEXT  = 0x02,
     PUSHVAR   = 0x03,
-    DECLARE   = 0x04,
-    DECLSET   = 0x05,
-    BINOP     = 0x06,
-    UNOP      = 0x07,
-    BINAS     = 0x08,
-    UNAS      = 0x09,
-    TRUTH     = 0x0A,
+    POP       = 0x04,
+    DECLARE   = 0x05,
+    DECLSET   = 0x06,
+    BINOP     = 0x07,
+    UNOP      = 0x08,
+    DIRECT    = 0x09, // direct variable reference (e.g. x)
+    INDIRECT  = 0x0A, // indirect variable reference (e.g. other.x)
+    INDEXP    = 0x0B,
+    BINAS     = 0x0C,
+    UNAS      = 0x0D,
+    TRUTH     = 0x0E,
     OPENSCOPE = 0x10, // opens a new variable declaration table
     EXITSCOPE = 0x11, // closes current var dec table
     SAVESCOPE = 0x12, // saves the current depth we're on in the stack of var decl tables to a stack
@@ -67,7 +103,7 @@ enum {
     JLIF      = 0x18,
     JS        = 0x19,
     JL        = 0x1A,
-    CALL      = 0x1B, // note: uses a unique progstate if calling a user-defined function
+    CALL      = 0x1B, // note: uses a unique progstate when calling a user-defined function
     FUNCDEF   = 0x1C,
     RETURN    = 0x1D,
 };
@@ -123,6 +159,9 @@ void interpret(progstate * program)
     auto * valstack = &(stack[0]);
     auto * varstack = &(variables[0]);
     auto & stackdepths = program->stackdepths;
+    auto & lvalue_islocal = program->lvalue_islocal;
+    auto & lvalue_id = program->lvalue_id;
+    auto & lvalue_name = program->lvalue_name;
     while(1)
     {
         if(pc == bytecode.size())
@@ -210,6 +249,22 @@ void interpret(progstate * program)
                 puts("Error: access of undeclared variable");
                 return;
             }
+            
+            break;
+        }
+        case POP:
+        {
+            if(variables.size() == 0)
+            {
+                puts("Internal error: no stack of variables");
+                exit(0);
+            }
+            if(valstack->size() < 1)
+            {
+                puts("Error: no value on the stack to pop");
+                return;
+            }
+            valstack->pop_back();
             
             break;
         }
@@ -432,88 +487,192 @@ void interpret(progstate * program)
             auto right = valstack->back();
             valstack->pop_back();
             
-            std::string name;
-            uint8_t c = bytecode[pc++];
-            while (c != 0)
-            {
-                name += c;
-                c = bytecode[pc++];
-            }
             
-            if(variables.size() == 0)
+            
+            if(lvalue_name == "")
             {
-                puts("Internal error: no stack of variables");
+                puts("Internal error: no lvalue in binary assignment");
                 exit(0);
             }
-            auto varstack_current = variables.size()-1;
-            while(variables[varstack_current].count(name) == 0 and varstack_current > 0)
-                varstack_current--;
-            auto & vstack = variables[varstack_current];
-            if(vstack.count(name))
+            
+            value * lvalue = nullptr;
+            if(lvalue_islocal)
             {
-                if(vstack[name].is_number and right.is_number)
+                if(variables.size() == 0)
                 {
-                    switch(bytecode[pc++])
-                    {
-                    case ASSIGN:
-                    {
-                        vstack[name] = right;
-                        break;
-                    }
-                    case MUTADD:
-                    {
-                        vstack[name].real += right.real;
-                        break;
-                    }
-                    case MUTSUB:
-                    {
-                        vstack[name].real -= right.real;
-                        break;
-                    }
-                    case MUTMUL:
-                    {
-                        vstack[name].real *= right.real;
-                        break;
-                    }
-                    case MUTDIV:
-                    {
-                        vstack[name].real /= right.real;
-                        break;
-                    }
-                    default:
-                    printf("Unknown binary numeric assignment 0x%02X at 0x%08X\n", bytecode[pc-1], pc-1);
-                    return;
-                    }
+                    puts("Internal error: tried operating on a zero-size stack of variable heaps");
+                    exit(0);
                 }
-                else if(!vstack[name].is_number and !right.is_number)
-                {
-                    switch(bytecode[pc++])
-                    {
-                    case ASSIGN:
-                    {
-                        vstack[name] = right;
-                        break;
-                    }
-                    case MUTADD:
-                    {
-                        vstack[name].text += right.text;
-                        break;
-                    }
-                    default:
-                    printf("Unknown binary assignment 0x%02X at 0x%08X\n", bytecode[pc-1], pc-1);
-                    return;
-                    }
-                }
+                auto varstack_current = variables.size()-1;
+                while(variables[varstack_current].count(lvalue_name) == 0 and varstack_current > 0)
+                    varstack_current--;
+                auto & vstack = variables[varstack_current];
+                if(vstack.count(lvalue_name))
+                    lvalue = &(vstack[lvalue_name]);
             }
             else
             {
-                puts("Error: tried to assign to undeclared variable");
+                if(!global.instances.count(lvalue_id))
+                {
+                    puts("Error: instance being dereferenced does not exist");
+                    break;
+                }
+                auto other = global.instances[lvalue_id];
+                if(other->variables.size() == 0)
+                {
+                    puts("Internal error: tried operating on a zero-size stack of variable heaps");
+                    exit(0);
+                }
+                auto varstack_current = other->variables.size()-1;
+                while(other->variables[varstack_current].count(lvalue_name) == 0 and varstack_current > 0)
+                    varstack_current--;
+                auto & vstack = other->variables[varstack_current];
+                if(vstack.count(lvalue_name))
+                    lvalue = &(vstack[lvalue_name]);
+            }
+            if(lvalue == nullptr)
+            {
+                puts("Error: assigning to undeclared variable");
+                break;
+            }
+            
+            
+            
+            if(lvalue->is_number and right.is_number)
+            {
+                switch(bytecode[pc++])
+                {
+                case ASSIGN:
+                {
+                    *lvalue = right;
+                    break;
+                }
+                case MUTADD:
+                {
+                    lvalue->real += right.real;
+                    break;
+                }
+                case MUTSUB:
+                {
+                    lvalue->real -= right.real;
+                    break;
+                }
+                case MUTMUL:
+                {
+                    lvalue->real *= right.real;
+                    break;
+                }
+                case MUTDIV:
+                {
+                    lvalue->real /= right.real;
+                    break;
+                }
+                default:
+                printf("Unknown binary numeric assignment 0x%02X at 0x%08X\n", bytecode[pc-1], pc-1);
                 return;
+                }
+            }
+            else if(!lvalue->is_number and !right.is_number)
+            {
+                switch(bytecode[pc++])
+                {
+                case ASSIGN:
+                {
+                    *lvalue = right;
+                    break;
+                }
+                case MUTADD:
+                {
+                    lvalue->text += right.text;
+                    break;
+                }
+                default:
+                printf("Unknown binary assignment 0x%02X at 0x%08X\n", bytecode[pc-1], pc-1);
+                return;
+                }
             }
             
             break;
         }
         case UNAS:
+        {
+            if(lvalue_name == "")
+            {
+                puts("Internal error: no lvalue in binary assignment");
+                exit(0);
+            }
+            
+            value * lvalue = nullptr;
+            if(lvalue_islocal)
+            {
+                if(variables.size() == 0)
+                {
+                    puts("Internal error: tried operating on a zero-size stack of variable heaps");
+                    exit(0);
+                }
+                auto varstack_current = variables.size()-1;
+                while(variables[varstack_current].count(lvalue_name) == 0 and varstack_current > 0)
+                    varstack_current--;
+                auto & vstack = variables[varstack_current];
+                if(vstack.count(lvalue_name))
+                    lvalue = &(vstack[lvalue_name]);
+            }
+            else
+            {
+                if(!global.instances.count(lvalue_id))
+                {
+                    puts("Error: instance being dereferenced does not exist");
+                    break;
+                }
+                auto other = global.instances[lvalue_id];
+                if(other->variables.size() == 0)
+                {
+                    puts("Internal error: tried operating on a zero-size stack of variable heaps");
+                    exit(0);
+                }
+                auto varstack_current = other->variables.size()-1;
+                while(other->variables[varstack_current].count(lvalue_name) == 0 and varstack_current > 0)
+                    varstack_current--;
+                auto & vstack = other->variables[varstack_current];
+                if(vstack.count(lvalue_name))
+                    lvalue = &(vstack[lvalue_name]);
+            }
+            if(lvalue == nullptr)
+            {
+                puts("Error: assigning to undeclared variable");
+                break;
+            }
+            
+            
+            if(lvalue->is_number)
+            {
+                switch(bytecode[pc++])
+                {
+                case INCREMENT:
+                {
+                    lvalue->real += 1;
+                    break;
+                }
+                case DECREMENT:
+                {
+                    lvalue->real -= 1;
+                    break;
+                }
+                default:
+                printf("Unknown unary numeric assignment 0x%02X at 0x%08X\n", bytecode[pc-1], pc-1);
+                return;
+                }
+            }
+            else
+            {
+                printf("Tried to apply unary numeric assignment to string at 0x%08X\n", pc-1);
+                return;
+            }
+            break;
+        }
+        // x = 7
+        // DIRECT x; BINAS ASSIGN 7
+        case DIRECT:
         {
             std::string name;
             uint8_t c = bytecode[pc++];
@@ -522,41 +681,77 @@ void interpret(progstate * program)
                 name += c;
                 c = bytecode[pc++];
             }
-            auto varstack_current = variables.size()-1;
-            while(variables[varstack_current].count(name) == 0 and varstack_current > 0)
-                varstack_current--;
-            auto & vstack = variables[varstack_current];
-            if(vstack.count(name))
+            
+            lvalue_id = 0;
+            lvalue_islocal = true;
+            lvalue_name = name;
+            
+            break;
+        }
+        // (10000).x
+        // only at the tail end of a left hand expression, the rest is INDEXP
+        case INDIRECT:
+        // indirection /expression/, as in it puts a value onto the stack
+        case INDEXP:
+        {
+            if(valstack->size() < 1)
             {
-                if(vstack[name].is_number)
-                {
-                    switch(bytecode[pc++])
-                    {
-                    case INCREMENT:
-                    {
-                        vstack[name].real += 1;
-                        break;
-                    }
-                    case DECREMENT:
-                    {
-                        vstack[name].real -= 1;
-                        break;
-                    }
-                    default:
-                    printf("Unknown unary numeric assignment 0x%02X at 0x%08X\n", bytecode[pc-1], pc-1);
-                    return;
-                    }
-                }
-                else
-                {
-                    printf("Tried to apply unary numeric assignment to string at 0x%08X\n", pc-1);
-                    return;
-                }
+                puts("Error: not enough arguments to lvalue indirection");
+                return;
+            }
+            value lhs = valstack->back();
+            valstack->pop_back();
+            
+            if(!lhs.is_number)
+            {
+                puts("Error: left hand side of derefence is not a number");
+                return;
+            }
+            
+            if(!global.instances.count(lhs.real))
+            {
+                puts("Error: attempt to dereference non-existent object");
+                return;
+            }
+            
+            std::string name;
+            uint8_t c = bytecode[pc++];
+            while (c != 0)
+            {
+                name += c;
+                c = bytecode[pc++];
+            }
+            
+            if(opcode == INDIRECT)
+            {
+                lvalue_id = lhs.real;
+                lvalue_name = name;
+                lvalue_islocal = false;
             }
             else
             {
-                puts("Error: tried to assign to undeclared variable");
-                return;
+                if(!global.instances.count(lhs.real))
+                {
+                    puts("Error: instance being dereferenced does not exist");
+                    break;
+                }
+                auto other = global.instances[lhs.real];
+                if(other->variables.size() == 0)
+                {
+                    puts("Internal error: tried operating on a zero-size stack of variable heaps");
+                    exit(0);
+                }
+                auto varstack_current = other->variables.size()-1;
+                while(other->variables[varstack_current].count(name) == 0 and varstack_current > 0)
+                    varstack_current--;
+                auto & vstack = other->variables[varstack_current];
+                if(vstack.count(name))
+                    valstack->push_back((vstack[name]));
+                else
+                {
+                    puts("Error: instance contains no such variable");
+                    break;
+                }
             }
             
             break;
@@ -752,6 +947,7 @@ void interpret(progstate * program)
                 arguments.push_back(valstack->back());
                 valstack->pop_back();
             }
+            std::reverse(arguments.begin(), arguments.end());
             if(name == "print")
             {
                 if(args != 1)
@@ -763,6 +959,30 @@ void interpret(progstate * program)
                     printf("%f\n", arguments[0].real);
                 else
                     printf("%s\n", arguments[0].text.data());
+                valstack->push_back(0);
+            }
+            else if(name == "instance_create")
+            {
+                if(args != 3)
+                {
+                    puts("Error: wrong number of arguments to function \"print\"");
+                    return;
+                }
+                if(arguments[0].is_number and arguments[1].is_number and arguments[2].is_number)
+                {
+                    // FIXME: handle object event stuff
+                    auto n = new progstate;
+                    auto id = global.nextinstance;
+                    global.instances[id] = n;
+                    n->variables.push_back({});
+                    n->variables[0]["x"] = arguments[0];
+                    n->variables[0]["y"] = arguments[1];
+                    n->variables[0]["object_id"] = arguments[2];
+                    n->variables[0]["id"] = global.nextinstance;
+                    n->stack.push_back({});
+                    global.nextinstance++;
+                    valstack->push_back(id);
+                }
             }
             else
             {
@@ -866,6 +1086,12 @@ void disassemble(progstate * program)
             }
             
             printf("PUSHVAR %s\n", name.data());
+            
+            break;
+        }
+        case POP:
+        {
+            printf("POP\n");
             
             break;
         }
@@ -993,7 +1219,9 @@ void disassemble(progstate * program)
             
             break;
         }
-        case BINAS:
+        case DIRECT:
+        case INDIRECT:
+        case INDEXP:
         {
             std::string name;
             uint8_t c = bytecode[pc++];
@@ -1002,32 +1230,44 @@ void disassemble(progstate * program)
                 name += c;
                 c = bytecode[pc++];
             }
+            if(opcode == DIRECT)
+                printf("DIRECT");
+            if(opcode == INDIRECT)
+                printf("INDIRECT");
+            if(opcode == INDEXP)
+                printf("INDEXP");
             
+            printf(" %s\n", name.data());
+            
+            break;
+        }
+        case BINAS:
+        {
             switch(bytecode[pc++])
             {
             case ASSIGN:
             {
-                printf("BINAS %s ASSIGN\n", name.data());
+                printf("BINAS ASSIGN\n");
                 break;
             }
             case MUTADD:
             {
-                printf("BINAS %s MUTADD\n", name.data());
+                printf("BINAS MUTADD\n");
                 break;
             }
             case MUTSUB:
             {
-                printf("BINAS %s MUTSUB\n", name.data());
+                printf("BINAS MUTSUB\n");
                 break;
             }
             case MUTMUL:
             {
-                printf("BINAS %s MUTMUL\n", name.data());
+                printf("BINAS MUTMUL\n");
                 break;
             }
             case MUTDIV:
             {
-                printf("BINAS %s MUTDIV\n", name.data());
+                printf("BINAS MUTDIV\n");
                 break;
             }
             default:
@@ -1040,24 +1280,16 @@ void disassemble(progstate * program)
         }
         case UNAS:
         {
-            std::string name;
-            uint8_t c = bytecode[pc++];
-            while (c != 0)
-            {
-                name += c;
-                c = bytecode[pc++];
-            }
-            
             switch(bytecode[pc++])
             {
             case INCREMENT:
             {
-                printf("UNAS %s INCREMENT\n", name.data());
+                printf("UNAS INCREMENT\n");
                 break;
             }
             case DECREMENT:
             {
-                printf("UNAS %s DECREMENT\n", name.data());
+                printf("UNAS DECREMENT\n");
                 break;
             }
             default:
@@ -1232,8 +1464,7 @@ int main()
 
 /*
 TODO list
-- implement for(;;){}
 - implement funcdef
-- implement objects and with(){}
+- implement with(){} and real object descriptions
 - implement more standard functions
 */

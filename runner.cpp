@@ -58,9 +58,15 @@ bool is_number(std::string s)
 {
     if(s.size() == 0) return false;
     
+    bool seen_dot = false;
+    
     for(char c : s)
-        if(!is_number(c))
+    {
+        if(c == '.' and !seen_dot)
+            seen_dot = true;
+        else if(!is_number(c))
             return false;
+    }
     return true;
 }
 
@@ -132,10 +138,17 @@ std::vector<token> lex(std::string str)
             }
             if(matched)
                 continue;
-            else if(is_number(str[i]))
+            else if(is_number(str[i]) or (i+1 < str.size() and str[i] == '.' and is_number(str[i+1])))
             {
+                std::string numtext;
+                numtext += str[i];
+                bool seen_dot = str[i] == '.';
                 uint64_t j;
-                for(j = i+1; j < str.size() and is_number(str[j]); j++);
+                for(j = i+1; j < str.size(); j++)
+                {
+                    if(!seen_dot and str[j] == '.') continue;
+                    else if(!is_number(str[j])) break;
+                }
                 tokenlist.push_back({i, j, str.substr(i, j-i)});
                 i = j;
             }
@@ -214,8 +227,8 @@ struct node {
     std::string identity;
     std::string text;
     std::string error;
-    int position;
-    int errorpos = 0;
+    uint64_t position;
+    uint64_t errorpos = 0;
     node * parent = nullptr;
     node * left = nullptr;
     node * right = nullptr;
@@ -295,11 +308,11 @@ void print_node(node * mynode, bool root = true)
     }
 }
 
-node * parse_expression(const std::vector<token> & tokens, int i, int & consumed);
+node * parse_expression(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed);
 
-node * parse_exp_paren(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_exp_paren(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     if(tokens[i].text == "(")
     {
@@ -309,7 +322,7 @@ node * parse_exp_paren(const std::vector<token> & tokens, int i, int & consumed)
         mynode->position = i;
         
         i++;
-        int consume = 0;
+        uint64_t consume = 0;
         auto rhs = parse_expression(tokens, i, consume);
         i += consume;
         mynode->right = rhs;
@@ -340,61 +353,232 @@ node * parse_exp_paren(const std::vector<token> & tokens, int i, int & consumed)
         if(verbose) puts("Paren expression signalling error");
         return mynode;
     }
-
 }
 
-node * parse_exp_corevalue(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_funccall(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed);
+node * parse_name(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed);
+
+// parses a whole string of indirections (character.player.x)
+node * parse_indirection(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
-    if(tokens[i].text == "(")
+    uint64_t left_consumed = 0;
+    auto left = parse_funccall(tokens, i, left_consumed);
+    if(left->iserror)
     {
-        return parse_exp_paren(tokens, i, consumed);
+        delete_node(left);
+        left_consumed = 0;
+        left = parse_name(tokens, i, left_consumed);
     }
-    else if(is_number(tokens[i].text))
+    if(left->iserror and tokens[i].text == "(")
     {
-        consumed = 1;
+        delete_node(left);
+        left_consumed = 0;
+        left = parse_exp_paren(tokens, i, left_consumed);
+    }
+    if(left->iserror)
+    {
+        delete_node(left);
+        
+        consumed = 0;
         auto mynode = new node;
-        mynode->identity = "corevalue";
-        mynode->text = tokens[i].text;
+        mynode->identity = "indirection";
+        mynode->iserror = true;
+        mynode->error = "Error: indirect variable access does not start with a name, function call, or parenthetical expression";
         mynode->position = i;
+        mynode->errorpos = tokens[i].position;
         return mynode;
     }
-    else if(is_name(tokens[i].text))
+    
+    if(i+left_consumed >= tokens.size())
     {
-        consumed = 1;
+        delete_node(left);
+        consumed = 0;
+        return unexpected_eos(i+left_consumed);
+    }
+    
+    if(tokens[i+left_consumed].text != ".")
+    {
+        delete_node(left);
+        
+        consumed = 0;
         auto mynode = new node;
-        mynode->identity = "name";
-        mynode->text = tokens[i].text;
+        mynode->identity = "indirection";
+        mynode->iserror = true;
+        mynode->error = "Error: indirect variable access has no indirection operator";
         mynode->position = i;
+        mynode->errorpos = tokens[i].position;
         return mynode;
     }
-    else if(is_string(tokens[i].text))
+    
+    if(i+left_consumed+1 >= tokens.size())
     {
-        consumed = 1;
+        delete_node(left);
+        return unexpected_eos(i+left_consumed+1);
+    }
+    
+    uint64_t right_consumed = 0;
+    auto right = parse_indirection(tokens, i+left_consumed+1, right_consumed);
+    
+    if(right->iserror)
+    {
+        delete_node(right);
+        right_consumed = 0;
+        right = parse_name(tokens, i+left_consumed+1, right_consumed);
+    }
+    if(right->iserror)
+    {
+        delete_node(left);
+        delete_node(right);
+        
+        consumed = 0;
         auto mynode = new node;
-        mynode->identity = "corevalue";
-        mynode->text = tokens[i].text;
+        mynode->identity = "indirection";
+        mynode->iserror = true;
+        mynode->error = "Error: right argument to indirection operator is not a name";
         mynode->position = i;
+        mynode->errorpos = tokens[i].position;
+        return mynode;
+    }
+    
+    if(right->identity == "indirection")
+    {
+        auto mynode = new node;
+        mynode->identity = "indirection";
+        mynode->position = i;
+        
+        consumed = left_consumed+1+right_consumed;
+        
+        auto array = (node **)malloc(sizeof(node*)*(1+right->arraynodes));
+        array[0] = left;
+        array[0]->parent = mynode;
+        for(int i = 0; i < right->arraynodes; i++)
+        {
+            array[i+1] = right->nodearray[i];
+            array[i+1]->parent = mynode;
+            right->nodearray[i] = nullptr;
+        }
+        
+        mynode->nodearray = array;
+        mynode->arraynodes = 1+right->arraynodes;
+        
+        delete_node(right);
+        return mynode;
+    }
+    else if(right->identity == "name")
+    {
+        auto mynode = new node;
+        mynode->identity = "indirection";
+        mynode->position = i;
+        
+        consumed = left_consumed+1+right_consumed;
+        
+        auto array = (node **)malloc(sizeof(node*)*2);
+        array[0] = left;
+        array[0]->parent = mynode;
+        array[1] = right;
+        array[1]->parent = mynode;
+        
+        mynode->nodearray = array;
+        mynode->arraynodes = 2;
+        
         return mynode;
     }
     else
     {
+        delete_node(left);
+        delete_node(right);
+        
         consumed = 0;
         auto mynode = new node;
-        mynode->identity = "corevalue";
+        mynode->identity = "indirection";
         mynode->iserror = true;
-        mynode->error = "Error: not a value";
+        mynode->error = "Error: unknown type of right argument to indirection operator; should be name or extension to string of indirections";
         mynode->position = i;
         mynode->errorpos = tokens[i].position;
-        if(verbose) puts("Value error");
         return mynode;
+    }
+    
+}
+
+node * parse_exp_corevalue(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
+{
+    if(i >= tokens.size()) return unexpected_eos(i);
+    
+    uint64_t indir_consumed = 0;
+    auto indir_maybe = parse_indirection(tokens, i, indir_consumed);
+    if(!indir_maybe->iserror)
+    {
+        consumed = indir_consumed;
+        return indir_maybe;
+    }
+    else
+    {
+        if(tokens[i].text == "(")
+        {
+            return parse_exp_paren(tokens, i, consumed);
+        }
+        else
+        {
+            delete_node(indir_maybe);
+            uint64_t funccall_consumed = 0;
+            auto funccall_maybe = parse_funccall(tokens, i, funccall_consumed);
+            if(!funccall_maybe->iserror)
+            {
+                consumed = funccall_consumed;
+                return funccall_maybe;
+            }
+            else
+            {
+                delete_node(funccall_maybe);
+                if(is_number(tokens[i].text))
+                {
+                    consumed = 1;
+                    auto mynode = new node;
+                    mynode->identity = "corevalue";
+                    mynode->text = tokens[i].text;
+                    mynode->position = i;
+                    return mynode;
+                }
+                else if(is_name(tokens[i].text))
+                {
+                    consumed = 1;
+                    auto mynode = new node;
+                    mynode->identity = "name";
+                    mynode->text = tokens[i].text;
+                    mynode->position = i;
+                    return mynode;
+                }
+                else if(is_string(tokens[i].text))
+                {
+                    consumed = 1;
+                    auto mynode = new node;
+                    mynode->identity = "corevalue";
+                    mynode->text = tokens[i].text;
+                    mynode->position = i;
+                    return mynode;
+                }
+                else
+                {
+                    consumed = 0;
+                    auto mynode = new node;
+                    mynode->identity = "corevalue";
+                    mynode->iserror = true;
+                    mynode->error = "Error: not a value";
+                    mynode->position = i;
+                    mynode->errorpos = tokens[i].position;
+                    if(verbose) puts("Value error");
+                    return mynode;
+                }
+            }
+        }
     }
 }
 
-node * parse_exp_value(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_exp_value(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     if(tokens[i].text == "-" or tokens[i].text == "+" or tokens[i].text == "!")
     {
@@ -402,19 +586,20 @@ node * parse_exp_value(const std::vector<token> & tokens, int i, int & consumed)
         mynode->identity = "unary_op";
         mynode->text = tokens[i].text;
         mynode->position = i;
-        mynode->right = parse_exp_value(tokens, i+1, consumed);
-        consumed++;
+        uint64_t exp_consumed = 0;
+        mynode->right = parse_exp_value(tokens, i+1, exp_consumed);
+        consumed = exp_consumed+1;
         return mynode;
     }
     else
         return parse_exp_corevalue(tokens, i, consumed);
 }
 
-typedef node*(*parser)(const std::vector<token> & tokens, int i, int & consumed);
+typedef node*(*parser)(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed);
 
-node * binary_parse_tail(const std::vector<token> & tokens, int i, int & consumed, const std::vector<std::string> opsymbols, parser d1)
+node * binary_parse_tail(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed, const std::vector<std::string> opsymbols, parser d1)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     for(auto op : opsymbols)
     {
@@ -426,7 +611,7 @@ node * binary_parse_tail(const std::vector<token> & tokens, int i, int & consume
             mynode->position = i;
             i++;
             
-            int consume;
+            uint64_t consume;
             auto rhs = d1(tokens, i, consume);
             mynode->right = rhs;
             rhs->parent = mynode;
@@ -467,11 +652,11 @@ node * binary_parse_tail(const std::vector<token> & tokens, int i, int & consume
     return mynode;
 }
 
-node * binary_parse(const std::vector<token> & tokens, int i, int & consumed, parser d1_tail, parser d2)
+node * binary_parse(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed, parser d1_tail, parser d2)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
-    int consumed_left, consumed_right;
+    uint64_t consumed_left, consumed_right;
     auto left = d2(tokens, i, consumed_left);
     if(consumed_left > 0)
     {
@@ -498,62 +683,62 @@ node * binary_parse(const std::vector<token> & tokens, int i, int & consumed, pa
     }
 }
 
-node * parse_exp_d5(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_exp_d5(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
     return parse_exp_value(tokens, i, consumed);
 }
 
-node * parse_exp_d4(const std::vector<token> & tokens, int i, int & consumed);
-node * parse_exp_d4_tail(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_exp_d4(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed);
+node * parse_exp_d4_tail(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
     return binary_parse_tail(tokens, i, consumed, {"*", "/"}, parse_exp_d4);
 }
-node * parse_exp_d4(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_exp_d4(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
     return binary_parse(tokens, i, consumed, parse_exp_d4_tail, parse_exp_d5);
 }
 
-node * parse_exp_d3(const std::vector<token> & tokens, int i, int & consumed);
-node * parse_exp_d3_tail(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_exp_d3(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed);
+node * parse_exp_d3_tail(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
     return binary_parse_tail(tokens, i, consumed, {"+", "-"}, parse_exp_d3);
 }
-node * parse_exp_d3(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_exp_d3(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
     return binary_parse(tokens, i, consumed, parse_exp_d3_tail, parse_exp_d4);
 }
 
-node * parse_exp_d2(const std::vector<token> & tokens, int i, int & consumed);
-node * parse_exp_d2_tail(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_exp_d2(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed);
+node * parse_exp_d2_tail(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
     return binary_parse_tail(tokens, i, consumed, {"==", "!=", ">=", "<=", ">", "<"}, parse_exp_d2);
 }
-node * parse_exp_d2(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_exp_d2(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
     return binary_parse(tokens, i, consumed, parse_exp_d2_tail, parse_exp_d3);
 }
 
-node * parse_exp_d1(const std::vector<token> & tokens, int i, int & consumed);
-node * parse_exp_d1_tail(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_exp_d1(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed);
+node * parse_exp_d1_tail(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
     return binary_parse_tail(tokens, i, consumed, {"&&", "||", "and", "or"}, parse_exp_d1);
 }
-node * parse_exp_d1(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_exp_d1(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
     return binary_parse(tokens, i, consumed, parse_exp_d1_tail, parse_exp_d2);
 }
 
-node * parse_expression(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_expression(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     return parse_exp_d1(tokens, i, consumed);
 }
 
-node * parse_block(const std::vector<token> & tokens, int i, int & consumed);
-node * parse_condition_else(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_block(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed);
+node * parse_condition_else(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     if(tokens[i].text == "else")
     {
@@ -563,7 +748,7 @@ node * parse_condition_else(const std::vector<token> & tokens, int i, int & cons
         mynode->position = i;
         consumed = 1;
         
-        int consumed_statement = 0;
+        uint64_t consumed_statement = 0;
         
         auto statement = parse_block(tokens, i+1, consumed_statement);
         
@@ -594,9 +779,9 @@ node * parse_condition_else(const std::vector<token> & tokens, int i, int & cons
         return mynode;
     }
 }
-node * parse_condition_if(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_condition_if(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     if(tokens[i].text == "if")
     {
@@ -606,7 +791,7 @@ node * parse_condition_if(const std::vector<token> & tokens, int i, int & consum
         mynode->position = i;
         consumed = 1;
         
-        int consumed_expr, consumed_statement, consumed_else;
+        uint64_t consumed_expr, consumed_statement, consumed_else;
         consumed_expr = 0;
         consumed_statement = 0;
         consumed_else = 0;
@@ -679,9 +864,9 @@ node * parse_condition_if(const std::vector<token> & tokens, int i, int & consum
         return mynode;
     }
 }
-node * parse_condition_while(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_condition_while(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     if(tokens[i].text == "while")
     {
@@ -691,7 +876,7 @@ node * parse_condition_while(const std::vector<token> & tokens, int i, int & con
         mynode->position = i;
         consumed = 1;
         
-        int consumed_expr, consumed_statement;
+        uint64_t consumed_expr, consumed_statement;
         consumed_expr = 0;
         consumed_statement = 0;
         
@@ -746,14 +931,14 @@ node * parse_condition_while(const std::vector<token> & tokens, int i, int & con
     }
 }
 
-node * parse_declaration(const std::vector<token> & tokens, int i, int & consumed);
-node * parse_mutation(const std::vector<token> & tokens, int i, int & consumed);
-node * parse_instruction_bare(const std::vector<token> & tokens, int i, int & consumed);
-node * parse_bigblock(const std::vector<token> & tokens, int i, int & consumed);
+node * parse_declaration(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed);
+node * parse_mutation(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed);
+node * parse_instruction_bare(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed);
+node * parse_bigblock(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed);
 
-node * parse_condition_for_header(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_condition_for_header(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     if(tokens[i].text != "(")
     {
@@ -767,7 +952,7 @@ node * parse_condition_for_header(const std::vector<token> & tokens, int i, int 
         return mynode;
     }
     
-    int left_consumed = 0;
+    uint64_t left_consumed = 0;
     auto left = parse_declaration(tokens, i+1, left_consumed);
     if(left->iserror)
     {
@@ -789,7 +974,7 @@ node * parse_condition_for_header(const std::vector<token> & tokens, int i, int 
             return mynode;
         }
     }
-    int middle_consumed = 0;
+    uint64_t middle_consumed = 0;
     auto middle = parse_expression(tokens, i+1+left_consumed, middle_consumed);
     if(middle->iserror)
     {
@@ -819,7 +1004,7 @@ node * parse_condition_for_header(const std::vector<token> & tokens, int i, int 
         mynode->errorpos = tokens[i+1+left_consumed+middle_consumed-1].endposition;
         return mynode;
     }
-    int right_consumed = 0;
+    uint64_t right_consumed = 0;
     auto right = parse_instruction_bare(tokens, i+1+left_consumed+middle_consumed+1, right_consumed);
     if(right->iserror)
     {
@@ -844,7 +1029,7 @@ node * parse_condition_for_header(const std::vector<token> & tokens, int i, int 
             return mynode;
         }
     }
-    int tentative_consumed = 1+left_consumed+middle_consumed+1+right_consumed;
+    uint64_t tentative_consumed = 1+left_consumed+middle_consumed+1+right_consumed;
     if (i+tentative_consumed >= tokens.size() or tokens[i+tentative_consumed].text != ")")
     {
         delete_node(middle);
@@ -877,9 +1062,9 @@ node * parse_condition_for_header(const std::vector<token> & tokens, int i, int 
     return mynode;
 }
 
-node * parse_condition_for(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_condition_for(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     if(tokens[i].text == "for")
     {
@@ -889,7 +1074,7 @@ node * parse_condition_for(const std::vector<token> & tokens, int i, int & consu
         mynode->position = i;
         consumed = 1;
         
-        int consumed_expr, consumed_statement;
+        uint64_t consumed_expr, consumed_statement;
         consumed_expr = 0;
         consumed_statement = 0;
         
@@ -955,9 +1140,9 @@ node * parse_condition_for(const std::vector<token> & tokens, int i, int & consu
     }
 }
 
-node * parse_name(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_name(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     if(is_name(tokens[i].text))
     {
@@ -982,11 +1167,11 @@ node * parse_name(const std::vector<token> & tokens, int i, int & consumed)
     }
 }
 
-node * parse_compound_name(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_compound_name(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
-    int name_consumed = 0;
+    uint64_t name_consumed = 0;
     auto name = parse_name(tokens, i, name_consumed);
     if(name->iserror)
     {
@@ -995,7 +1180,7 @@ node * parse_compound_name(const std::vector<token> & tokens, int i, int & consu
     }
     if(i+name_consumed+1 < tokens.size() and tokens[i+name_consumed].text == "=")
     {
-        int expr_consumed = 0;
+        uint64_t expr_consumed = 0;
         auto expr = parse_expression(tokens, i+name_consumed+1, expr_consumed);
         if(expr->iserror)
         {
@@ -1027,11 +1212,11 @@ node * parse_compound_name(const std::vector<token> & tokens, int i, int & consu
     }
 }
 
-node * parse_deflist(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_deflist(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
-    int left_consumed = 0;
+    uint64_t left_consumed = 0;
     auto left = parse_compound_name(tokens, i, left_consumed);
     if(left->iserror)
     {
@@ -1052,7 +1237,7 @@ node * parse_deflist(const std::vector<token> & tokens, int i, int & consumed)
     }
     if(i+left_consumed+1 < tokens.size() and tokens[i+left_consumed].text == ",")
     {
-        int tail_consumed = 0;
+        uint64_t tail_consumed = 0;
         auto tail = parse_deflist(tokens, i+left_consumed+1, tail_consumed);
         if(tail->iserror)
         {
@@ -1083,9 +1268,9 @@ node * parse_deflist(const std::vector<token> & tokens, int i, int & consumed)
     }
 }
 
-node * parse_declaration(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_declaration(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     if(tokens[i].text == "var")
     {
@@ -1103,7 +1288,7 @@ node * parse_declaration(const std::vector<token> & tokens, int i, int & consume
         auto mynode = new node;
         mynode->identity = "declaration";
         mynode->text = "var";
-        int deflist_consumed = 0;
+        uint64_t deflist_consumed = 0;
         auto deflist = parse_deflist(tokens, i+1, deflist_consumed);
         if(!deflist->iserror)
         {
@@ -1158,11 +1343,11 @@ const std::vector<std::string> unary_mutations = {
     "++", "=="
 };
 
-node * parse_mutation(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_mutation(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
-    int name_consumed = 0;
+    uint64_t name_consumed = 0;
     auto name = parse_name(tokens, i, name_consumed);
     if(name->iserror)
     {
@@ -1245,7 +1430,7 @@ node * parse_mutation(const std::vector<token> & tokens, int i, int & consumed)
         }
         else if(is_binary_mutation)
         {
-            int expr_consumed = 0;
+            uint64_t expr_consumed = 0;
             auto expr = parse_expression(tokens, i+name_consumed+1, expr_consumed);
             if(expr->iserror)
             {
@@ -1289,11 +1474,11 @@ node * parse_mutation(const std::vector<token> & tokens, int i, int & consumed)
     }
 }
 
-node * parse_funcargs(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_funcargs(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
-    int left_consumed = 0;
+    uint64_t left_consumed = 0;
     auto left = parse_expression(tokens, i, left_consumed);
     if(left->iserror)
     {
@@ -1306,10 +1491,10 @@ node * parse_funcargs(const std::vector<token> & tokens, int i, int & consumed)
         return mynode;
     }
     std::vector<node *> arguments = {left};
-    int addon_total_consumed = 0;
+    uint64_t addon_total_consumed = 0;
     if(i+left_consumed+1 < tokens.size() and tokens[i+left_consumed].text == ",")
     {
-        int addon_consumed = 1;
+        uint64_t addon_consumed = 1;
         auto addon = parse_expression(tokens, i+left_consumed+1, addon_consumed);
         while(!addon->iserror)
         {
@@ -1329,15 +1514,19 @@ node * parse_funcargs(const std::vector<token> & tokens, int i, int & consumed)
                 mynode->iserror = true;
                 mynode->error = "Error: unexpected end of stream while parsing argument list";
                 mynode->errorpos = tokens[i+left_consumed+1+addon_total_consumed-1].endposition;
+                puts("funcargs EOS");
                 return mynode;
             }
             
             if(tokens[i+left_consumed+1+addon_total_consumed].text == ")")
+            {
+                addon_total_consumed += 1;
                 break;
+            }
             else if(tokens[i+left_consumed+1+addon_total_consumed].text == ",")
             {
                 addon = parse_expression(tokens, i+left_consumed+1+addon_total_consumed+1, addon_consumed);
-                addon_total_consumed += 1+addon_consumed;
+                addon_total_consumed += 1;
             }
             else
             {
@@ -1352,6 +1541,7 @@ node * parse_funcargs(const std::vector<token> & tokens, int i, int & consumed)
                 mynode->iserror = true;
                 mynode->error = "Error: unexpected symbol encountered while parsing function arguments";
                 mynode->errorpos = tokens[i+left_consumed+1+addon_total_consumed].position;
+                printf("funcargs unexpected symbol %s at %d\n", tokens[i+left_consumed+1+addon_total_consumed].text.data(), i+left_consumed+1+addon_total_consumed);
                 return mynode;
             }
         }
@@ -1359,11 +1549,11 @@ node * parse_funcargs(const std::vector<token> & tokens, int i, int & consumed)
             delete_node(addon);
     }
     
-    int arraynodes = arguments.size();
+    uint64_t arraynodes = arguments.size();
     
     auto array = (node **)malloc(sizeof(node*)*arraynodes);
     auto mynode = new node;
-    for(int i = 0; i < arraynodes; i++)
+    for(uint64_t i = 0; i < arraynodes; i++)
     {
         array[i] = arguments[i];
         array[i]->parent = mynode;
@@ -1378,12 +1568,14 @@ node * parse_funcargs(const std::vector<token> & tokens, int i, int & consumed)
     
     consumed = left_consumed+addon_total_consumed;
     
+    printf("funcargs consumed %d tokens (%d+%d)\n", consumed, left_consumed, addon_total_consumed);
+    
     return mynode;
 }
 
-node * parse_funccall(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_funccall(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     if(!is_name(tokens[i].text))
     {
@@ -1422,7 +1614,7 @@ node * parse_funccall(const std::vector<token> & tokens, int i, int & consumed)
         return mynode;
     }
     
-    int funcargs_consumed = 0;
+    uint64_t funcargs_consumed = 0;
     auto funcargs = parse_funcargs(tokens, i+2, funcargs_consumed);
     
     if(funcargs->iserror)
@@ -1470,9 +1662,9 @@ node * parse_funccall(const std::vector<token> & tokens, int i, int & consumed)
     }
 }
 
-node * parse_order(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_order(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     if(is_order(tokens[i].text))
     {
@@ -1495,15 +1687,15 @@ node * parse_order(const std::vector<token> & tokens, int i, int & consumed)
     }
 }
 
-node * parse_instruction_bare(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_instruction_bare(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     auto mynode = new node;
     mynode->identity = "instruction";
     mynode->position = i;
     
-    int inner_instruction_consumed = 0;
+    uint64_t inner_instruction_consumed = 0;
     auto inner_instruction = parse_mutation(tokens, i, inner_instruction_consumed);
     
     if(inner_instruction->iserror)
@@ -1556,18 +1748,30 @@ node * parse_instruction_bare(const std::vector<token> & tokens, int i, int & co
 
 }
 
-node * parse_instruction(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_instruction(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
-    int instruction_consumed = 0;
+    uint64_t instruction_consumed = 0;
     auto instruction = parse_instruction_bare(tokens, i, instruction_consumed);
     if(instruction->iserror)
     {
         consumed = 0;
         return instruction;
     }
-    else if(i+instruction_consumed >= tokens.size() or tokens[i+instruction_consumed].text != ";")
+    else if(i+instruction_consumed >= tokens.size())
+    {
+        delete_node(instruction);
+        auto mynode = new node;
+        mynode->identity = "instruction";
+        mynode->iserror = true;
+        mynode->error = "Error: unexpected end of stream looking for \";\" at end of instruction";
+        mynode->position = i+instruction_consumed;
+        mynode->errorpos = tokens[i+instruction_consumed-1].endposition+1;
+        consumed = 0;
+        return mynode;
+    }
+    else if(tokens[i+instruction_consumed].text != ";")
     {
         delete_node(instruction);
         auto mynode = new node;
@@ -1575,7 +1779,7 @@ node * parse_instruction(const std::vector<token> & tokens, int i, int & consume
         mynode->iserror = true;
         mynode->error = "Error: expected \";\" at end of instruction";
         mynode->position = i+instruction_consumed;
-        mynode->errorpos = tokens[i+instruction_consumed-1].endposition+1;
+        mynode->errorpos = tokens[i+instruction_consumed].position;
         consumed = 0;
         return mynode;
     }
@@ -1586,9 +1790,9 @@ node * parse_instruction(const std::vector<token> & tokens, int i, int & consume
     }
 }
 
-node * parse_statement(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_statement(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     if(i+1 < tokens.size() and (tokens[i].text == "if" or tokens[i].text == "while" or tokens[i].text == "for") and tokens[i+1].text == "(")
     {
@@ -1624,11 +1828,11 @@ node * parse_statement(const std::vector<token> & tokens, int i, int & consumed)
     }
 }
 
-node * parse_statementlist(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_statementlist(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed, bool eos_required = false)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
-    int consume_left, consume_right;
+    uint64_t consume_left, consume_right;
     consume_left = 0;
     consume_right = 0;
     auto lhs = parse_statement(tokens, i, consume_left);
@@ -1637,17 +1841,25 @@ node * parse_statementlist(const std::vector<token> & tokens, int i, int & consu
         consumed = 0;
         return lhs;
     }
-    auto rhs = parse_statementlist(tokens, i+consume_left, consume_right);
+    auto rhs = parse_statementlist(tokens, i+consume_left, consume_right, eos_required);
     if(rhs->iserror)
     {
-        delete_node(rhs);
-        auto mynode = new node;
-        mynode->identity = "statementlist";
-        mynode->left = lhs;
-        lhs->parent = mynode;
-        
-        consumed = consume_left;
-        return lhs;
+        if(eos_required and i+consume_left != tokens.size())
+        {
+            delete_node(lhs);
+            return rhs;
+        }
+        else
+        {
+            delete_node(rhs);
+            auto mynode = new node;
+            mynode->identity = "statementlist";
+            mynode->left = lhs;
+            lhs->parent = mynode;
+            
+            consumed = consume_left;
+            return lhs;
+        }
     }
     else
     {
@@ -1663,9 +1875,9 @@ node * parse_statementlist(const std::vector<token> & tokens, int i, int & consu
     }
 }
 
-node * parse_bigblock(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_bigblock(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     if(tokens[i].text == "{")
     {
@@ -1674,7 +1886,7 @@ node * parse_bigblock(const std::vector<token> & tokens, int i, int & consumed)
         mynode->text = "{}";
         mynode->position = i;
         
-        int consume = 0;
+        uint64_t consume = 0;
         auto rhs = parse_statementlist(tokens, i+1, consume);
         
         if(rhs->iserror)
@@ -1732,9 +1944,9 @@ node * parse_bigblock(const std::vector<token> & tokens, int i, int & consumed)
     }
 }
 
-node * parse_block(const std::vector<token> & tokens, int i, int & consumed)
+node * parse_block(const std::vector<token> & tokens, uint64_t i, uint64_t & consumed)
 {
-    if(i < 0 or i >= tokens.size()) return unexpected_eos(i);
+    if(i >= tokens.size()) return unexpected_eos(i);
     
     if(tokens[i].text == "{")
     {
@@ -1761,8 +1973,8 @@ node * parse(const std::vector<token> & tokens)
 {
     if(tokens.size() == 0) return nullptr;
     
-    int consumed;
-    auto tree = parse_statementlist(tokens, 0, consumed);
+    uint64_t consumed;
+    auto tree = parse_statementlist(tokens, 0, consumed, true);
     
     if(tree->iserror)
     {
@@ -1879,7 +2091,7 @@ struct stackinfo {
     std::vector<uint64_t> continues;
 };
 
-void compile(node * tree, std::vector<uint8_t> * bytecode, stackinfo * jumpdata);
+void compile(node * tree, std::vector<uint8_t> * bytecode, stackinfo * jumpdata, bool is_lvalue_area = false);
 
 void compile_while(node * tree, std::vector<uint8_t> * bytecode, stackinfo * jumpdata)
 {
@@ -2060,7 +2272,7 @@ void compile_for(node * tree, std::vector<uint8_t> * bytecode, stackinfo * jumpd
     bytecode->push_back(EXITSCOPE);
 }
 
-void compile(node * tree, std::vector<uint8_t> * bytecode, stackinfo * jumpdata)
+void compile(node * tree, std::vector<uint8_t> * bytecode, stackinfo * jumpdata, bool is_lvalue_area)
 {
     if(tree == nullptr)
     {
@@ -2092,6 +2304,8 @@ void compile(node * tree, std::vector<uint8_t> * bytecode, stackinfo * jumpdata)
         else
         {
             compile(tree->right, bytecode, jumpdata);
+            if(tree->right->identity == "funccall")
+                bytecode->push_back(POP);
             return;
         }
     }
@@ -2102,14 +2316,18 @@ void compile(node * tree, std::vector<uint8_t> * bytecode, stackinfo * jumpdata)
             puts("Internal Error: assignment has no left argument in AST");
             exit(0);
         }
+        
+        // TODO: compile in different ways depending on the nature of the left hand
+        bytecode->push_back(DIRECT);
+        for(const auto & c : tree->left->text)
+            bytecode->push_back(c);
+        bytecode->push_back('\0');
+        
         if(tree->right)
         {
             compile(tree->right, bytecode, jumpdata);
-            bytecode->push_back(BINAS);
             
-            for(const auto & c : tree->left->text)
-                bytecode->push_back(c);
-            bytecode->push_back('\0');
+            bytecode->push_back(BINAS);
             
             if(tree->text == "=")
                 bytecode->push_back(ASSIGN);
@@ -2131,10 +2349,6 @@ void compile(node * tree, std::vector<uint8_t> * bytecode, stackinfo * jumpdata)
         else
         {
             bytecode->push_back(UNAS);
-            
-            for(const auto & c : tree->left->text)
-                bytecode->push_back(c);
-            bytecode->push_back('\0');
             
             if(tree->text == "++")
                 bytecode->push_back(INCREMENT);
@@ -2522,6 +2736,28 @@ void compile(node * tree, std::vector<uint8_t> * bytecode, stackinfo * jumpdata)
         encode_u64(bytecode, 0);
         return;
     }
+    if(tree->identity == "indirection")
+    {
+        compile(tree->nodearray[0], bytecode, jumpdata);
+        
+        for(int i = 1; i < tree->arraynodes; i++)
+        {
+            if(tree->nodearray[i]->identity != "name")
+            {
+                puts("Internal error: a non-furthest-left node under an indirection is not a name");
+                exit(0);
+            }
+            if(i+1 == tree->arraynodes and is_lvalue_area)
+                bytecode->push_back(INDIRECT);
+            else
+                bytecode->push_back(INDEXP);
+            for(const auto & c : tree->nodearray[i]->text)
+                bytecode->push_back(c);
+            bytecode->push_back(0);
+        }
+        
+        return;
+    }
     printf("Error: unknown identifier %s<%s>\n", tree->identity.data(), tree->text.data());
     return;//exit(0);
 }
@@ -2545,9 +2781,24 @@ void test(std::string str)
         if(tree->iserror)
         {
             puts(tree->error.data());
-            puts(str.data());
-            for(int i = 0; i < tree->errorpos; i++)
-                    printf(" ");
+            //puts(str.data());
+            uint64_t start = 0;
+            uint64_t end = str.size();
+            for(uint64_t i = 0; i < str.size(); i++)
+            {
+                if(i >= tree->errorpos and (str[i] == '\n' or str[i] == '\0'))
+                {
+                    end = i;
+                    break;
+                }
+                if(str[i] == '\n') start = i;
+            }
+            
+            for(uint64_t i = start; i < end; i++)
+                printf("%c", str[i]);
+            printf("\n");
+            for(uint64_t i = start; i < tree->errorpos; i++)
+                printf(" ");
             puts("^");
             puts("");
         }
@@ -2630,6 +2881,8 @@ int main()
         ops.push_back("}");
         ops.push_back("(");
         ops.push_back(")");
+        
+        ops.push_back(".");
     }
     
     test("var x = 2*4+1==9;");
@@ -2741,6 +2994,13 @@ int main()
 "    print(i);\n"
 "    print(y);\n"
 "}\n");
+    
+    test("print(!!0.5);");
+
+    test("var t = print(0); t = print(0); print(0);");
+    test("print(3.1);");
+    test("print((1));");
+    test("var t = instance_create(3.1, 0, 0); print(t); print(t.x); print(t.id.id.x);");
     
     /*
     test("2*3/4");
