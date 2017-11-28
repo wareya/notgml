@@ -45,3 +45,4 @@
 - make variable access etc. in the bytecode interpreter go through an interface instead of being duplicated code
 - reduce duplication in the parser and compiler
 - make some kind of real object definition system
+- write an updated textual grammar that represents what the parser does
