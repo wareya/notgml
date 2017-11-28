@@ -4,3 +4,44 @@
 - the parser is a manually-written recursive descent parser with the ability to backtrack when the desired node was not found
 - the compiler walks the abstract syntax tree recursively
 - the bytecode vm definition, interpreter, and disassembler are in bytecode.cpp. everything else is in runner.cpp.
+
+- unlike game maker, semicolons at the end of statements and parens around conditional expressions are mandatory
+
+- parse() is the entry point to the parser
+- the grammar the parser uses makes the program consist of a statement list
+- the root statement list must end at exactly EOS
+- expressions are parsed as though they are right-associative (1-(2-4)) even when they're left associative ((1-2)-4)
+-- because left association = left recursion (binop : binop operator expression), and left recursion breaks recursive descent (or makes it very slow, n^2, if worked around)
+- left-associativity is fixed after parsing, across the entire AST, rotating sequences of binary operations with the same precedence that are supposed to be left-associative
+- the AST is almost entirely a binary tree where left/right indicate actual position in the lexeme's token list
+- some expressions would be annoying to compile if parsed as binary tree nodes, so they use an array of nodes instead
+- a lot of the parsing code is redundant garbage and should be refactored as soon as the language is usable for anything nontrivial
+- statementlist is recursive and binary right now but it should probably have a flat array of children instead
+
+- parser nodes have an identity (how they behave, approximately) and text (the actual text from the program code representing it, if possible)
+- for binary operations, the identity is that it is a binary operation, and the text is which binary operation it is
+- operation precedence is determined by being parsed at different functions in the parser
+
+- the compiler is very simple, except for the compilation of loops (while, for, and in the future with), which have their own functions
+
+- the lexer is very simple
+- newlines and spaces are truly ignored except for delineating symbols that are not otherwise delineated (like "this and that" vs "thisandthat")
+
+- the bytecode system has operations that operate on scope directly in order to emulate lexical scope
+- loops pose a serious problem: how do you break out of a dynamic scope safely, without analyzing the relative depth of the jump?
+- solution: push and pop the depth of scope to a stack, pulling the depth and unwinding to it when we break out or continue early
+- the bytecode generated for while() to handle this is really dirty; the bytecode generated for for() to handle this is better and I should switch while() to it
+- this unfortunately cannot be used to implement goto
+
+- indirection works by operating on an instance id value on the left and a name on the right
+- when you do compound indirections, e.g. player.character.health, you want to use the value of player.character, not set yourself up to assign to it
+- solution: two indirection operators. both use the left value as pulling it from the stack. one pushes the resulting value to the stack, the other sets the lvalue related registers.
+- this means normal variable assignments have to use lvalue registers as well
+
+- conditions use a truth register instead of merely running an expression on the stack
+-- this is so that if conditions ever have to be checked twice without evaluating the expression twice, the register value can be used instead
+
+- TODO:
+- make variable access etc. in the bytecode interpreter go through an interface instead of being duplicated code
+- reduce duplication in the parser and compiler
+- make some kind of real object definition system
