@@ -1,0 +1,6 @@
+- notgml is a dynamic language, but emulates lexical scope as much as possible
+- it compiles to bytecode, where all jump operations are relative, and function calls are referenced by name, not location
+- the bytecode is a stack language, except for a small number of internal special-use registers that are not exposed to the bytecode
+- the parser is a manually-written recursive descent parser with the ability to backtrack when the desired node was not found
+- the compiler walks the abstract syntax tree recursively
+- the bytecode vm definition, interpreter, and disassembler are in bytecode.cpp. everything else is in runner.cpp.

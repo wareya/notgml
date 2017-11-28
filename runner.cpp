@@ -322,12 +322,32 @@ node * parse_exp_paren(const std::vector<token> & tokens, uint64_t i, uint64_t &
         mynode->position = i;
         
         i++;
+        
+        if(i >= tokens.size())
+        {
+            mynode->iserror = true;
+            mynode->error = "Error: encountered end of stream while looking for expression within paren";
+            mynode->position = i;
+            mynode->errorpos = tokens[i-1].endposition;
+            return mynode;
+        }
+        
         uint64_t consume = 0;
         auto rhs = parse_expression(tokens, i, consume);
         i += consume;
         mynode->right = rhs;
         rhs->parent = mynode;
-        if(rhs->iserror or i >= tokens.size() or tokens[i].text != ")")
+        
+        if(i >= tokens.size())
+        {
+            mynode->iserror = true;
+            mynode->error = "Error: encountered end of stream while looking for ending paren to parenthetical expression";
+            mynode->position = i;
+            mynode->errorpos = tokens[i-1].endposition;
+            return mynode;
+        }
+        
+        if(rhs->iserror or tokens[i].text != ")")
         {
             mynode->iserror = true;
             mynode->error = "Error: expected closing paren";
@@ -3001,6 +3021,7 @@ int main()
     test("print(3.1);");
     test("print((1));");
     test("var t = instance_create(3.1, 0, 0); print(t); print(t.x); print(t.id.id.x);");
+    test("print(1); while (1");
     
     /*
     test("2*3/4");

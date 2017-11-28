@@ -32,6 +32,8 @@ struct globalstate
     std::map<double, progstate *> instances;
     double nextinstance = 1000000;
     
+    double instance_spawn();
+    
     void reset()
     {
         instances.clear();
@@ -75,6 +77,19 @@ struct progstate
         pc = 0;
     }
 };
+
+double globalstate::instance_spawn()
+{
+    auto n = new progstate;
+    auto id = global.nextinstance;
+    global.nextinstance++;
+    
+    global.instances[id] = n;
+    n->variables.push_back({});
+    n->stack.push_back({});
+    
+    return id;
+}
 
 enum {
     NOP       = 0x00,
@@ -971,16 +986,13 @@ void interpret(progstate * program)
                 if(arguments[0].is_number and arguments[1].is_number and arguments[2].is_number)
                 {
                     // FIXME: handle object event stuff
-                    auto n = new progstate;
-                    auto id = global.nextinstance;
-                    global.instances[id] = n;
-                    n->variables.push_back({});
+                    auto id = global.instance_spawn();
+                    auto n = global.instances[id];
                     n->variables[0]["x"] = arguments[0];
                     n->variables[0]["y"] = arguments[1];
                     n->variables[0]["object_id"] = arguments[2];
-                    n->variables[0]["id"] = global.nextinstance;
-                    n->stack.push_back({});
-                    global.nextinstance++;
+                    n->variables[0]["id"] = id;
+                    
                     valstack->push_back(id);
                 }
             }
